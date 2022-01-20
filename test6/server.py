@@ -2,14 +2,29 @@ import json
 import logging
 import sys
 import socket
-from logs import configuration_server
+import time
 from utils.decorators import Log
+import argparse
+import select
 
 from utils.utils import load_configs, get_message, send_message
 
 CONFIGS = dict()
 
 SERVER_LOGGER = logging.getLogger('server')
+
+
+@Log()
+def arg_parser(CONFIGS):
+    global SERVER_LOGGER
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-p', default=CONFIGS['DEFAULT_PORT'], type=int, nargs='?')
+    parser.add_argument('-a', default='', nargs='?')
+    namespace = parser.parse_args(sys.argv[1:])
+    listen_address = namespace.a
+    listen_port = namespace.p
+    server_port = namespace.port
+    return listen_address, listen_port
 
 
 @Log()
@@ -31,38 +46,19 @@ def handle_message(message, CONFIGS):
 def main():
     global CONFIGS, SERVER_LOGGER
     CONFIGS = load_configs()
-    listen_port = CONFIGS.get('DEFAULT_PORT')
-    try:
-        if '-p' in sys.argv:
-            listen_port = int(sys.argv[sys.argv.index('-p') + 1])
-        if not 65535 >= listen_port >= 1024:
-            raise ValueError
-    except IndexError:
-        SERVER_LOGGER.critical('После -\'p\' необходимо указать порт')
-        sys.exit(1)
-    except ValueError:
-        SERVER_LOGGER.critical(f'Попытка запуска сервера с некорректного порта {listen_port}.'
-                               'Порт должен быть указан в пределах от 1024 до 65535')
-        sys.exit(1)
-
-    try:
-        if '-a' in sys.argv:
-            listen_address = sys.argv[sys.argv.index('-a') + 1]
-        else:
-            listen_address = ''
-
-    except IndexError:
-        SERVER_LOGGER.critical('После \'a\'- необходимо указать адрес.')
-        sys.exit(1)
-
-    SERVER_LOGGER.info(f'Сервер запущен на порту: {listen_port}, по адресу: {listen_address}.')
+    listen_address, listen_port = arg_parser(CONFIGS)
+    if not 1023 < listen_port < 65536:
+        print(f'{listen_port} не входит в диапозон от 1023 до 65536')
+        sys.exit(0)
 
     transport = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     transport.bind((listen_address, listen_port))
-
     transport.listen(CONFIGS.get('MAX_CONNECTIONS'))
+    clients = []
+    messages = []
 
     while True:
+
         client, client_address = transport.accept()
         try:
             message = get_message(client, CONFIGS)
@@ -72,6 +68,39 @@ def main():
         except (ValueError, json.JSONDecodeError):
             SERVER_LOGGER.critical('Принято некорретное сообщение от клиента')
             client.close()
+
+        try:
+            client, client_address = transport.accept()
+            SERVER_LOGGER.info(f'{client_address} соединение')
+            clients.append(client)
+        except OSError:
+            pass
+        input_list = []
+        send_list = []
+        err_list = []
+        try:
+            if clients:
+                input_list, send_list, err_list = select.select(clients, clients, [], 0)
+        except OSError:
+            pass
+
+        if input_list:
+            for client in input_list:
+                try:
+                    handle_message(get_message(client, CONFIGS), messages, client, CONFIGS)
+                except:
+                    clients.remove(client)
+
+        if messages and send_list:
+            message = {
+                CONFIGS['MESSAGE_TEXT']: messages[0][1],
+                CONFIGS['SENDER']: messages[0][0],
+                CONFIGS['ACTION']: CONFIGS['MESSAGE'],
+                CONFIGS['TIME']: time.time(),
+            }
+            del messages[0]
+            for waiting_client in send_list:
+                send_message(waiting_client, message, CONFIGS)
 
 
 if __name__ == '__main__':
