@@ -14,6 +14,7 @@ CONFIGS = dict()
 SERVER_LOGGER = logging.getLogger('server')
 
 
+
 @Log()
 def arg_parser(CONFIGS):
     global SERVER_LOGGER
